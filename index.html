@@ -1,0 +1,232 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Uber Fare Predictor - Pro Version with Map & Search</title>
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
+    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+    <style>
+        body { background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); min-height: 100vh; }
+        .card { border-radius: 20px; box-shadow: 0 15px 40px rgba(0,0,0,0.3); }
+        #map { height: 450px; border-radius: 15px; }
+        .result { font-size: 2.8rem; font-weight: bold; color: #28a745; }
+        .distance { font-size: 1.3rem; font-weight: 600; color: #007bff; }
+    </style>
+</head>
+<body class="d-flex align-items-center justify-content-center">
+    <div class="container">
+        <div class="row justify-content-center">
+            <div class="col-lg-11">
+                <div class="card p-4">
+                    <h2 class="text-center mb-3">🚖 Uber Fare Predictor <small>(Pro Map + Search)</small></h2>
+
+                    <!-- SEARCH BAR -->
+                    <div class="input-group mb-3">
+                        <input type="text" id="searchInput" class="form-control" placeholder="Search address (e.g. Times Square, JFK Airport)">
+                        <button id="searchPickupBtn" class="btn btn-success">Search as Pickup</button>
+                        <button id="searchDropoffBtn" class="btn btn-danger">Search as Dropoff</button>
+                    </div>
+
+                    <!-- MAP -->
+                    <div class="mb-4">
+                        <h5>🗺️ NYC Map (Locked to dataset area)</h5>
+                        <div id="map"></div>
+                    </div>
+
+                    <form id="fareForm">
+                        <div class="row g-3">
+                            <div class="col-md-6">
+                                <label>Pickup Lat</label>
+                                <input type="text" id="pickup_lat" class="form-control" readonly>
+                            </div>
+                            <div class="col-md-6">
+                                <label>Pickup Lon</label>
+                                <input type="text" id="pickup_lon" class="form-control" readonly>
+                            </div>
+                            <div class="col-md-6">
+                                <label>Dropoff Lat</label>
+                                <input type="text" id="dropoff_lat" class="form-control" readonly>
+                            </div>
+                            <div class="col-md-6">
+                                <label>Dropoff Lon</label>
+                                <input type="text" id="dropoff_lon" class="form-control" readonly>
+                            </div>
+                            <div class="col-md-6">
+                                <label>Passengers</label>
+                                <input type="number" id="passenger_count" class="form-control" value="1" min="1" max="6">
+                            </div>
+                            <div class="col-md-6">
+                                <label>Pickup Time</label>
+                                <input type="datetime-local" id="pickup_datetime" class="form-control">
+                            </div>
+                        </div>
+                        <button type="submit" class="btn btn-primary w-100 mt-4">🚀 Predict Exact Fare</button>
+                    </form>
+
+                    <!-- RESULT + DISTANCE -->
+                    <div id="result" class="mt-4 text-center"></div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+    <script>
+        // === MAP LOCKED TO NYC (prevents wrong predictions) ===
+        const map = L.map('map', {
+            maxBounds: [[40.5, -74.1], [41.0, -73.7]],
+            maxBoundsViscosity: 1.0
+        }).setView([40.7128, -74.0060], 13);
+
+        L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png').addTo(map);
+
+        let pickupMarker = null, dropoffMarker = null, routeLine = null;
+        let currentSearchMode = null;
+
+        // Haversine (same as backend)
+        function haversine(lat1, lon1, lat2, lon2) {
+            const R = 6371;
+            const dLat = (lat2 - lat1) * Math.PI / 180;
+            const dLon = (lon2 - lon1) * Math.PI / 180;
+            const a = Math.sin(dLat/2) * Math.sin(dLat/2) +
+                      Math.cos(lat1 * Math.PI / 180) * Math.cos(lat2 * Math.PI / 180) *
+                      Math.sin(dLon/2) * Math.sin(dLon/2);
+            return R * 2 * Math.asin(Math.sqrt(a));
+        }
+
+        // Search Function
+        async function searchLocation(query, mode) {
+            if (!query) return;
+            const url = `https://nominatim.openstreetmap.org/search?q=${encodeURIComponent(query)}&format=json&limit=1&bounded=1&viewbox=-74.1,41.0,-73.7,40.5`;
+            try {
+                const res = await fetch(url);
+                const data = await res.json();
+                if (data.length === 0) {
+                    alert("Location not found in NYC!");
+                    return;
+                }
+                const lat = parseFloat(data[0].lat);
+                const lon = parseFloat(data[0].lon);
+
+                if (mode === 'pickup') {
+                    document.getElementById('pickup_lat').value = lat.toFixed(6);
+                    document.getElementById('pickup_lon').value = lon.toFixed(6);
+                    if (pickupMarker) map.removeLayer(pickupMarker);
+                    pickupMarker = L.marker([lat, lon]).addTo(map).bindPopup('Pickup').openPopup();
+                } else {
+                    document.getElementById('dropoff_lat').value = lat.toFixed(6);
+                    document.getElementById('dropoff_lon').value = lon.toFixed(6);
+                    if (dropoffMarker) map.removeLayer(dropoffMarker);
+                    dropoffMarker = L.marker([lat, lon], {color: 'red'}).addTo(map).bindPopup('Dropoff').openPopup();
+                }
+                map.flyTo([lat, lon], 15);
+                updateRouteAndDistance();
+            } catch(e) { alert("Search failed. Try again."); }
+        }
+
+        // Buttons
+        document.getElementById('searchPickupBtn').onclick = () => {
+            const q = document.getElementById('searchInput').value.trim();
+            searchLocation(q, 'pickup');
+        };
+        document.getElementById('searchDropoffBtn').onclick = () => {
+            const q = document.getElementById('searchInput').value.trim();
+            searchLocation(q, 'dropoff');
+        };
+
+        // Click on map (backup method)
+        map.on('click', e => {
+            const lat = e.latlng.lat.toFixed(6);
+            const lon = e.latlng.lng.toFixed(6);
+            if (confirm("Set as Pickup?")) {
+                document.getElementById('pickup_lat').value = lat;
+                document.getElementById('pickup_lon').value = lon;
+                if (pickupMarker) map.removeLayer(pickupMarker);
+                pickupMarker = L.marker([lat, lon]).addTo(map).bindPopup('Pickup');
+            } else {
+                document.getElementById('dropoff_lat').value = lat;
+                document.getElementById('dropoff_lon').value = lon;
+                if (dropoffMarker) map.removeLayer(dropoffMarker);
+                dropoffMarker = L.marker([lat, lon], {color: 'red'}).addTo(map).bindPopup('Dropoff');
+            }
+            updateRouteAndDistance();
+        });
+
+        function updateRouteAndDistance() {
+            const pLat = parseFloat(document.getElementById('pickup_lat').value);
+            const pLon = parseFloat(document.getElementById('pickup_lon').value);
+            const dLat = parseFloat(document.getElementById('dropoff_lat').value);
+            const dLon = parseFloat(document.getElementById('dropoff_lon').value);
+
+            if (pLat && pLon && dLat && dLon) {
+                const dist = haversine(pLat, pLon, dLat, dLon).toFixed(2);
+                document.getElementById('result').innerHTML = `
+                    <div class="alert alert-info">
+                        <strong>Distance:</strong> ${dist} km
+                    </div>`;
+                
+                if (routeLine) map.removeLayer(routeLine);
+                routeLine = L.polyline([[pLat, pLon], [dLat, dLon]], {color: 'blue', weight: 4}).addTo(map);
+            }
+        }
+
+        // Form Submit
+        document.getElementById('fareForm').addEventListener('submit', async (e) => {
+            e.preventDefault();
+            const pLat = document.getElementById('pickup_lat').value;
+            const pLon = document.getElementById('pickup_lon').value;
+            const dLat = document.getElementById('dropoff_lat').value;
+            const dLon = document.getElementById('dropoff_lon').value;
+
+            if (!pLat || !pLon || !dLat || !dLon) {
+                alert("Please select both pickup and dropoff locations first!");
+                return;
+            }
+
+            const data = {
+                passenger_count: parseInt(document.getElementById('passenger_count').value),
+                pickup_latitude: parseFloat(pLat),
+                pickup_longitude: parseFloat(pLon),
+                dropoff_latitude: parseFloat(dLat),
+                dropoff_longitude: parseFloat(dLon),
+                pickup_datetime: document.getElementById('pickup_datetime').value.replace('T', ' ') + ':00'
+            };
+
+            try {
+                const res = await fetch('http://localhost:8000/predict', {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify(data)
+                });
+                const result = await res.json();
+                
+                const dist = haversine(parseFloat(pLat), parseFloat(pLon), parseFloat(dLat), parseFloat(dLon)).toFixed(2);
+                
+                document.getElementById('result').innerHTML = `
+                    <div class="alert alert-success">
+                        <h3>Exact Fare: <span class="result">$${result.predicted_fare}</span></h3>
+                        <p class="distance">Distance: ${dist} km | Model is trained on real NYC Uber data</p>
+                    </div>`;
+            } catch (err) {
+                document.getElementById('result').innerHTML = `<div class="alert alert-danger">Error: ${err.message}<br>Is backend running?</div>`;
+            }
+        });
+
+        // Default time + sample
+        const now = new Date();
+        document.getElementById('pickup_datetime').value = now.toISOString().slice(0,16);
+        
+        // Sample locations
+        setTimeout(() => {
+            document.getElementById('pickup_lat').value = "40.7128";
+            document.getElementById('pickup_lon').value = "-74.0060";
+            document.getElementById('dropoff_lat').value = "40.7589";
+            document.getElementById('dropoff_lon').value = "-73.9851";
+            pickupMarker = L.marker([40.7128, -74.0060]).addTo(map).bindPopup('Pickup');
+            dropoffMarker = L.marker([40.7589, -73.9851], {color:'red'}).addTo(map).bindPopup('Dropoff');
+            updateRouteAndDistance();
+        }, 800);
+    </script>
+</body>
+</html>
